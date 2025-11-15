@@ -12,12 +12,29 @@ const App = () => {
     text: companyInfo,
   }]);
   const [showChatbot, setShowChatbot] = useState(false);
+  const [showTooltip, setShowTooltip] = useState(true);
   const [sessionId] = useState(() => 
     `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
   );
   const [complaintData, setComplaintData] = useState(null);
   
   const chatBodyRef = useRef();
+
+  // Hide tooltip after 5 seconds or when chatbot opens
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setShowTooltip(false);
+    }, 5000);
+
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Hide tooltip when chatbot is opened
+  useEffect(() => {
+    if (showChatbot) {
+      setShowTooltip(false);
+    }
+  }, [showChatbot]);
 
   // Log message to database
   const logMessage = async (role, message, classificationData = null) => {
@@ -100,10 +117,7 @@ const App = () => {
 
   // Extract complaint details from conversation
   const extractComplaintDetails = (conversation) => {
-    // Try to find complaint ID (format: IRC followed by numbers)
     const complaintIdMatch = conversation.match(/#(IRC\d+)/);
-    
-    // Extract user details with flexible patterns
     const nameMatch = conversation.match(/(?:Name|name|NAME)[:;\s-]*([A-Za-z\s]+?)(?:[,\n]|Email|email|Contact|contact|PNR|pnr|Train|train)/);
     const emailMatch = conversation.match(/(?:Email|email|EMAIL)[:;\s-]*([\w\.-]+@[\w\.-]+\.\w+)/);
     const contactMatch = conversation.match(/(?:Contact|contact|CONTACT|Phone|phone|Mobile|mobile)[:;\s-]*(\d{10})/);
@@ -113,7 +127,6 @@ const App = () => {
     const coachMatch = conversation.match(/(?:Coach|coach|COACH)[:;\s-]*([A-Z0-9]+)/);
     const seatMatch = conversation.match(/(?:Seat|seat|SEAT)[:;\s-]*(\d+)/);
     
-    // Log extraction results for debugging
     console.log("Extraction results:", {
       complaintId: complaintIdMatch?.[1],
       name: nameMatch?.[1],
@@ -124,7 +137,6 @@ const App = () => {
       trainName: trainNameMatch?.[1]
     });
     
-    // Minimum required fields (including train name and number)
     if (complaintIdMatch && nameMatch && emailMatch && contactMatch && pnrMatch && trainNumberMatch && trainNameMatch) {
       return {
         complaint_id: complaintIdMatch[1],
@@ -152,10 +164,8 @@ const App = () => {
 
     const latestUserMessage = history[history.length - 1].text;
 
-    // Log user message to database
     await logMessage("user", latestUserMessage);
 
-    // Check if it's likely a complaint
     const complaintKeywords = [
       'stale', 'hair', 'cockroach', 'dirty', 'rude', 'refund', 'expired',
       'overcharge', 'missing', 'delay', 'allergy', 'cold', 'bad', 'terrible',
@@ -171,7 +181,6 @@ const App = () => {
     let classification = null;
     let enhancedPrompt = "";
 
-    // If it's a complaint, classify it
     if (isLikelyComplaint) {
       console.log("🔍 Complaint detected, classifying...");
       classification = await classifyComplaint(latestUserMessage);
@@ -179,7 +188,6 @@ const App = () => {
       if (classification) {
         console.log(`✅ Classification successful: ${classification.category}`);
         
-        // Store classification data for later use
         setComplaintData(prev => ({
           ...prev,
           complaint_text: latestUserMessage,
@@ -189,7 +197,6 @@ const App = () => {
           department: classification.department
         }));
 
-        // Add classification context for Gemini - NOW INCLUDES TRAIN NAME
         enhancedPrompt = `\n\n[SYSTEM CONTEXT: The user's complaint has been automatically classified as "${classification.category}" with ${(classification.confidence * 100).toFixed(1)}% confidence. This complaint will be routed to the ${classification.department} department. 
 
 IMPORTANT: When the user provides their personal details, you MUST ask for ALL of the following in this order:
@@ -208,7 +215,6 @@ Then confirm the complaint registration and include the classification category 
       }
     }
 
-    // Format chat history for Gemini API
     const formattedHistory = history.map(({ role, text }) => ({ 
       role, 
       parts: [{ text: text + (role === "user" && classification ? enhancedPrompt : "") }] 
@@ -221,7 +227,6 @@ Then confirm the complaint registration and include the classification category 
     };
 
     try {
-      // Call Gemini API
       const response = await fetch(GEMINI_API_URL, requestOptions);
       const data = await response.json();
 
@@ -229,29 +234,24 @@ Then confirm the complaint registration and include the classification category 
         throw new Error(data.error?.message || "Something went wrong. Try again later.");
       }
 
-      // Get Gemini's response
       let apiResponseText = data.candidates[0].content.parts[0].text
         .replace(/\*\*(.*?)\*\*/g, "$1")
         .trim();
 
-      // Log bot response to database
       await logMessage("model", apiResponseText, classification);
 
-      // Check if complaint was confirmed (contains complaint ID)
       const complaintIdMatch = apiResponseText.match(/#(IRC\d+)/);
       
       if (complaintIdMatch && complaintData) {
         console.log(`🎯 Complaint ID detected: ${complaintIdMatch[1]}`);
         console.log("📋 Attempting to extract user details...");
         
-        // Extract user details from the entire conversation
         const fullConversation = history.map(h => h.text).join("\n") + "\n" + apiResponseText;
         const extractedDetails = extractComplaintDetails(fullConversation);
         
         if (extractedDetails) {
           console.log("✅ Details extracted successfully:", extractedDetails);
           
-          // Register complaint to database
           const registered = await registerComplaint({
             ...extractedDetails,
             ...complaintData
@@ -263,7 +263,6 @@ Then confirm the complaint registration and include the classification category 
             console.error("❌ Failed to save complaint to database");
           }
           
-          // Clear complaint data
           setComplaintData(null);
         } else {
           console.warn("⚠️ Could not extract all required details (including train name) from conversation");
@@ -279,7 +278,6 @@ Then confirm the complaint registration and include the classification category 
   };
 
   useEffect(() => {
-    // Auto-scroll when chat updates
     if (chatBodyRef.current) {
       setTimeout(() => {
         chatBodyRef.current.scrollTo({ 
@@ -292,6 +290,11 @@ Then confirm the complaint registration and include the classification category 
 
   return (
     <div className={`container ${showChatbot ? "show-chatbot" : ""}`}>
+      {/* Tooltip */}
+      <div className={`chat-tooltip ${showTooltip ? "show" : ""}`}>
+        Click here to chat! 💬
+      </div>
+
       <button 
         id="chatbot-toggler" 
         onClick={() => setShowChatbot(prev => !prev)}
