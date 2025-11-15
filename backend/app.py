@@ -11,8 +11,12 @@ from datetime import datetime, date
 app = Flask(__name__)
 CORS(app)
 
-# Database configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///irctc_complaints.db'
+# Database configuration - Use PostgreSQL for production
+DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///irctc_complaints.db')
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Initialize database
@@ -21,8 +25,10 @@ db = SQLAlchemy(app)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# LAZY LOADING - Don't load model at startup
 model = None
 tokenizer = None
+model_loading = False
 
 COMPLAINT_CATEGORIES = {
     0: "Allergy violation", 1: "App failure", 2: "Cockroach",
@@ -92,9 +98,9 @@ class Complaint(db.Model):
     user_contact = db.Column(db.String(15), nullable=False)
     user_pnr = db.Column(db.String(10), nullable=False, index=True)
     train_number = db.Column(db.String(10), nullable=False, index=True)
-    train_name = db.Column(db.String(100), nullable=False)  # NOW REQUIRED
-    coach = db.Column(db.String(10), nullable=False)  # NOW REQUIRED
-    seat = db.Column(db.String(10), nullable=False)  # NOW REQUIRED
+    train_name = db.Column(db.String(100), nullable=False)
+    coach = db.Column(db.String(10), nullable=False)
+    seat = db.Column(db.String(10), nullable=False)
     
     # Complaint Details
     complaint_text = db.Column(db.Text, nullable=False)
@@ -181,45 +187,45 @@ class Analytics(db.Model):
     avg_confidence_score = db.Column(db.Float, default=0.0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-# def load_model(model_path="./model"):
-#     """Load the trained model"""
-#     global model, tokenizer
-#     try:
-#         logger.info("Loading model and tokenizer...")
-#         tokenizer = AutoTokenizer.from_pretrained(model_path)
-#         model = AutoModelForSequenceClassification.from_pretrained(model_path)
-#         model.eval()
-#         logger.info(f"✅ Model loaded! Categories: {len(COMPLAINT_CATEGORIES)}")
-#         return True
-#     except Exception as e:
-#         logger.error(f"❌ Error loading model: {e}")
-#         return False
 
-def load_model(model_path="./model"):
-    """Load the trained model from Hugging Face or local"""
-    global model, tokenizer
+def get_model():
+    """LAZY LOAD MODEL - Only load when first classification is requested"""
+    global model, tokenizer, model_loading
+    
+    if model is not None and tokenizer is not None:
+        return model, tokenizer
+    
+    if model_loading:
+        raise Exception("Model is currently loading, please wait...")
+    
     try:
-        logger.info("Loading model and tokenizer...")
+        model_loading = True
+        logger.info("🔄 Loading model (first request)...")
+        
+        model_path = "./model"
         
         # Try loading from local first
         if os.path.exists(model_path):
+            logger.info(f"Loading from local path: {model_path}")
             tokenizer = AutoTokenizer.from_pretrained(model_path)
             model = AutoModelForSequenceClassification.from_pretrained(model_path)
-            logger.info(f"✅ Model loaded from local path!")
         else:
             # Load from Hugging Face
-            HF_MODEL_NAME = "jas2204/irctc-complaint-classifier"  # Update this!
-            logger.info(f"Loading model from Hugging Face: {HF_MODEL_NAME}")
+            HF_MODEL_NAME = "jas2204/irctc-complaint-classifier"
+            logger.info(f"Loading from Hugging Face: {HF_MODEL_NAME}")
             tokenizer = AutoTokenizer.from_pretrained(HF_MODEL_NAME)
             model = AutoModelForSequenceClassification.from_pretrained(HF_MODEL_NAME)
-            logger.info(f"✅ Model loaded from Hugging Face!")
         
         model.eval()
-        logger.info(f"Categories: {len(COMPLAINT_CATEGORIES)}")
-        return True
+        logger.info(f"✅ Model loaded successfully! Categories: {len(COMPLAINT_CATEGORIES)}")
+        model_loading = False
+        return model, tokenizer
+        
     except Exception as e:
+        model_loading = False
         logger.error(f"❌ Error loading model: {e}")
-        return False
+        raise
+
 
 def update_daily_analytics():
     """Update daily analytics"""
@@ -264,9 +270,44 @@ def update_daily_analytics():
         logger.error(f"Analytics update error: {e}")
         db.session.rollback()
 
+
+@app.route('/', methods=['GET'])
+def home():
+    """Home endpoint"""
+    return jsonify({
+        'message': 'IRCTC Complaint System API',
+        'status': 'running',
+        'endpoints': {
+            'classify': '/classify',
+            'register': '/complaint/register',
+            'complaints': '/complaints',
+            'health': '/health'
+        }
+    })
+
+
+@app.route('/healthz', methods=['GET'])
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check with database status"""
+    try:
+        db.session.execute(db.text('SELECT 1'))
+        db_status = 'connected'
+    except:
+        db_status = 'disconnected'
+    
+    return jsonify({
+        'status': 'healthy',
+        'model_loaded': model is not None,
+        'database_status': db_status,
+        'total_complaints': Complaint.query.count(),
+        'total_classifications': ClassificationLog.query.count()
+    })
+
+
 @app.route('/classify', methods=['POST'])
 def classify():
-    """Classify complaint and log to database"""
+    """Classify complaint and log to database - Model loads on first use"""
     try:
         data = request.json
         text = data.get('text', '').strip()
@@ -275,13 +316,19 @@ def classify():
         if not text:
             return jsonify({'error': 'Empty text'}), 400
         
-        if model is None or tokenizer is None:
-            return jsonify({'error': 'Model not loaded'}), 500
+        # LAZY LOAD MODEL HERE
+        try:
+            current_model, current_tokenizer = get_model()
+        except Exception as e:
+            return jsonify({
+                'error': 'Model loading failed',
+                'message': str(e)
+            }), 500
         
-        inputs = tokenizer(text, padding=True, truncation=True, max_length=128, return_tensors="pt")
+        inputs = current_tokenizer(text, padding=True, truncation=True, max_length=128, return_tensors="pt")
         
         with torch.no_grad():
-            outputs = model(**inputs)
+            outputs = current_model(**inputs)
             predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
             top3_values, top3_indices = torch.topk(predictions[0], 3)
             predicted_class = top3_indices[0].item()
@@ -325,6 +372,7 @@ def classify():
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/complaint/register', methods=['POST'])
 def register_complaint():
     """Register complete complaint to database"""
@@ -337,10 +385,10 @@ def register_complaint():
             user_email=data['user_email'],
             user_contact=data['user_contact'],
             user_pnr=data['user_pnr'],
-            train_number=data['train_number'],  # Now required
-            train_name=data.get('train_name'),
-            coach=data.get('coach'),
-            seat=data.get('seat'),
+            train_number=data['train_number'],
+            train_name=data.get('train_name', ''),
+            coach=data.get('coach', ''),
+            seat=data.get('seat', ''),
             complaint_text=data['complaint_text'],
             category=data['category'],
             category_id=data['category_id'],
@@ -371,6 +419,7 @@ def register_complaint():
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/message/log', methods=['POST'])
 def log_message():
     """Log chat message"""
@@ -395,6 +444,7 @@ def log_message():
         logger.error(f"❌ Message logging error: {e}")
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/complaints', methods=['GET'])
 def get_complaints():
@@ -427,6 +477,7 @@ def get_complaints():
         logger.error(f"❌ Complaints fetch error: {e}")
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/analytics/daily', methods=['GET'])
 def get_daily_analytics():
     """Get daily analytics"""
@@ -449,43 +500,28 @@ def get_daily_analytics():
         logger.error(f"❌ Analytics fetch error: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/health', methods=['GET'])
-def health():
-    """Health check with database status"""
-    try:
-        db.session.execute('SELECT 1')
-        db_status = 'connected'
-    except:
-        db_status = 'disconnected'
-    
-    return jsonify({
-        'status': 'healthy',
-        'model_loaded': model is not None,
-        'database_status': db_status,
-        'total_complaints': Complaint.query.count(),
-        'total_classifications': ClassificationLog.query.count()
-    })
 
 # Initialize database tables
 with app.app_context():
-    db.create_all()
-    logger.info("✅ Database tables created/verified")
+    try:
+        db.create_all()
+        logger.info("✅ Database tables created/verified")
+    except Exception as e:
+        logger.error(f"❌ Database initialization error: {e}")
+
 
 if __name__ == '__main__':
     logger.info("=" * 60)
-    logger.info("🚂 IRCTC Complaint System with Database Logging")
+    logger.info("🚂 IRCTC Complaint System")
+    logger.info("=" * 60)
+    logger.info("⚡ Model: Lazy Loading (loads on first /classify request)")
+    logger.info("📊 Database: Connected")
     logger.info("=" * 60)
     
-    model_loaded = load_model("./model")
+    # Get port from environment variable (Render provides this)
+    port = int(os.environ.get('PORT', 5000))
     
-    if not model_loaded:
-        logger.warning("⚠️  Model not loaded")
-    else:
-        logger.info("✅ Model loaded successfully!")
-    
-    logger.info("=" * 60)
-    logger.info("📊 Database: SQLite (irctc_complaints.db)")
-    logger.info("🚀 Server: http://0.0.0.0:5000")
+    logger.info(f"🚀 Server starting on port {port}")
     logger.info("=" * 60)
     
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=False)
