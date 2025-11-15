@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+env/
+venv/
+.venv/
+ENV/
+*.egg-info/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+backend/irctc_complaints.db
+
+# Model files - WE'LL DOWNLOAD FROM HUGGING FACE
+backend/model/
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# Environment variables
+.env
+.env.local
+frontend/.env
+
+# Node.js
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
