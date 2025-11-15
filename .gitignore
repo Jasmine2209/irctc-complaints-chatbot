@@ -26,6 +26,7 @@ backend/model/
 .env
 .env.local
 frontend/.env
+frontend/config.js
 
 # Node.js
 frontend/node_modules/
