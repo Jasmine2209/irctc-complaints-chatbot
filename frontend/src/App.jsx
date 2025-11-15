@@ -3,6 +3,7 @@ import ChatbotIcon from "./components/ChatbotIcon";
 import ChatForm from "./components/ChatForm";
 import ChatMessage from "./components/ChatMessage";
 import { companyInfo } from "./components/companyInfo";
+import { BACKEND_URL, GEMINI_API_URL } from "./config";
 
 const App = () => {
   const [chatHistory, setChatHistory] = useState([{
@@ -21,7 +22,7 @@ const App = () => {
   // Log message to database
   const logMessage = async (role, message, classificationData = null) => {
     try {
-      await fetch("http://127.0.0.1:5000/message/log", {
+      await fetch(`${BACKEND_URL}/message/log`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -41,7 +42,7 @@ const App = () => {
   // Classify complaint using backend
   const classifyComplaint = async (complaintText) => {
     try {
-      const response = await fetch("http://127.0.0.1:5000/classify", {
+      const response = await fetch(`${BACKEND_URL}/classify`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
@@ -73,7 +74,7 @@ const App = () => {
   // Register complete complaint to database
   const registerComplaint = async (complaintDetails) => {
     try {
-      const response = await fetch("http://127.0.0.1:5000/complaint/register", {
+      const response = await fetch(`${BACKEND_URL}/complaint/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -221,7 +222,7 @@ Then confirm the complaint registration and include the classification category 
 
     try {
       // Call Gemini API
-      const response = await fetch(import.meta.env.VITE_API_URL, requestOptions);
+      const response = await fetch(GEMINI_API_URL, requestOptions);
       const data = await response.json();
 
       if (!response.ok) {
