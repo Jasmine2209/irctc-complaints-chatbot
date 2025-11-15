@@ -4,6 +4,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 import logging
 from datetime import datetime, date
+import re
 
 
 app = Flask(__name__)
@@ -21,11 +22,6 @@ db = SQLAlchemy(app)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# GLOBAL VARIABLES - Model loads lazily
-model = None
-tokenizer = None
-model_loading = False
 
 COMPLAINT_CATEGORIES = {
     0: "Allergy violation", 1: "App failure", 2: "Cockroach",
@@ -79,6 +75,36 @@ PRIORITY_MAP = {
     "Non-delivery": "High",
     "Stale food": "High",
     "Stale roti": "Medium",
+}
+
+# KEYWORD-BASED CLASSIFICATION RULES
+CLASSIFICATION_RULES = {
+    "Allergy violation": ["allergy", "allergic", "reaction", "allergen", "nut", "peanut", "shellfish", "lactose"],
+    "App failure": ["app crash", "not working", "app error", "technical issue", "app problem", "bug", "glitch", "app down"],
+    "Cockroach": ["cockroach", "roach", "insect", "bug in food", "pest"],
+    "Declining quality": ["quality declined", "worse than before", "not good anymore", "quality dropped"],
+    "Dietary violation": ["non-veg in veg", "meat in vegetarian", "jain food", "religious", "halal", "kosher"],
+    "Dirty tray": ["dirty tray", "unclean tray", "filthy tray", "tray not clean"],
+    "Double payment": ["charged twice", "double charge", "paid twice", "duplicate payment", "double debit"],
+    "Expired item": ["expired", "expiry date", "past expiry", "old product", "outdated"],
+    "Fraud cancellation": ["fraud", "scam", "cancelled without reason", "fake cancellation", "cheating"],
+    "Hair in food": ["hair in", "found hair", "strand of hair", "human hair"],
+    "Missing items": ["didn't receive", "missing", "not delivered all", "incomplete order", "items missing"],
+    "No baby food": ["baby food", "infant food", "no food for baby", "child food unavailable"],
+    "No bill": ["no bill", "bill not provided", "receipt missing", "invoice not given", "no receipt"],
+    "No food option removed": ["removed from menu", "not available", "discontinued", "option not there"],
+    "No hot water": ["cold water", "no hot water", "lukewarm", "not heated"],
+    "No hygiene": ["unhygienic", "no hygiene", "unsanitary", "dirty", "filthy", "not clean"],
+    "No kids meal": ["kids meal", "children food", "no food for kids", "child portion"],
+    "Non-delivery": ["not delivered", "didn't deliver", "no delivery", "never received", "order not came"],
+    "Overcharging": ["overcharged", "too expensive", "charged extra", "high price", "excess charge"],
+    "Pantry closed early": ["pantry closed", "closed early", "shut before time", "not available"],
+    "Partial delivery": ["partial", "incomplete", "only some items", "missing some"],
+    "Plastic waste": ["plastic", "environmental", "too much packaging", "waste", "non-biodegradable"],
+    "Refund delay": ["refund not received", "refund delayed", "money not back", "waiting for refund"],
+    "Rude staff": ["rude", "misbehave", "impolite", "unprofessional", "bad behavior", "staff attitude"],
+    "Stale food": ["stale", "not fresh", "old food", "spoiled", "bad smell", "rotten", "smells bad"],
+    "Stale roti": ["stale roti", "hard roti", "old roti", "roti not fresh"]
 }
 
 # Database Models
@@ -152,7 +178,7 @@ class ClassificationLog(db.Model):
     department = db.Column(db.String(100), nullable=False)
     top_predictions = db.Column(db.JSON, nullable=True)
     timestamp = db.Column(db.DateTime, default=datetime.utcnow, nullable=False, index=True)
-    model_version = db.Column(db.String(50), default='v1.0')
+    model_version = db.Column(db.String(50), default='rule-based-v1.0')
 
 class Analytics(db.Model):
     __tablename__ = 'analytics'
@@ -167,40 +193,67 @@ class Analytics(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
-def get_model():
-    """LAZY LOAD - Only loads on first /classify request"""
-    global model, tokenizer, model_loading
+def classify_complaint_rule_based(text):
+    """Rule-based classification using keywords"""
+    text_lower = text.lower()
     
-    if model is not None and tokenizer is not None:
-        return model, tokenizer
+    # Score each category based on keyword matches
+    scores = {}
+    for category, keywords in CLASSIFICATION_RULES.items():
+        score = 0
+        matched_keywords = []
+        
+        for keyword in keywords:
+            if keyword in text_lower:
+                score += 1
+                matched_keywords.append(keyword)
+        
+        if score > 0:
+            scores[category] = {
+                'score': score,
+                'keywords': matched_keywords
+            }
     
-    if model_loading:
-        raise Exception("Model is loading, please wait...")
+    # If no matches, default to "App failure"
+    if not scores:
+        category = "App failure"
+        category_id = 1
+        confidence = 0.50
+    else:
+        # Get top 3 matches
+        sorted_categories = sorted(scores.items(), key=lambda x: x[1]['score'], reverse=True)
+        
+        # Best match
+        category = sorted_categories[0][0]
+        category_id = list(COMPLAINT_CATEGORIES.values()).index(category)
+        
+        # Calculate confidence (simple heuristic)
+        total_score = sum(s['score'] for _, s in sorted_categories)
+        confidence = min(0.95, 0.70 + (scores[category]['score'] / total_score) * 0.25)
     
-    try:
-        model_loading = True
-        logger.info("🔄 Loading model (first classification)...")
+    department = CATEGORY_DEPARTMENTS.get(category, "Customer Service")
+    
+    # Generate top 3 predictions
+    top_predictions = []
+    if scores:
+        sorted_cats = sorted(scores.items(), key=lambda x: x[1]['score'], reverse=True)[:3]
+        total = sum(s['score'] for _, s in sorted_cats)
         
-        from transformers import AutoTokenizer, AutoModelForSequenceClassification
-        
-        model_path = "./model"
-        if os.path.exists(model_path):
-            tokenizer = AutoTokenizer.from_pretrained(model_path)
-            model = AutoModelForSequenceClassification.from_pretrained(model_path)
-        else:
-            HF_MODEL_NAME = "jas2204/irctc-complaint-classifier"
-            tokenizer = AutoTokenizer.from_pretrained(HF_MODEL_NAME)
-            model = AutoModelForSequenceClassification.from_pretrained(HF_MODEL_NAME)
-        
-        model.eval()
-        logger.info(f"✅ Model loaded! Categories: {len(COMPLAINT_CATEGORIES)}")
-        model_loading = False
-        return model, tokenizer
-        
-    except Exception as e:
-        model_loading = False
-        logger.error(f"❌ Model load error: {e}")
-        raise
+        for cat, data in sorted_cats:
+            cat_id = list(COMPLAINT_CATEGORIES.values()).index(cat)
+            conf = 0.70 + (data['score'] / total) * 0.25
+            top_predictions.append({
+                'category': cat,
+                'confidence': round(min(0.95, conf), 4)
+            })
+    else:
+        top_predictions = [
+            {'category': 'App failure', 'confidence': 0.50},
+            {'category': 'Declining quality', 'confidence': 0.30},
+            {'category': 'Rude staff', 'confidence': 0.20}
+        ]
+    
+    return category, category_id, confidence, department, top_predictions
 
 
 @app.route('/', methods=['GET'])
@@ -208,6 +261,7 @@ def home():
     return jsonify({
         'message': 'IRCTC Complaint System API',
         'status': 'running',
+        'classification': 'rule-based (optimized for free tier)',
         'endpoints': {
             'classify': '/classify',
             'register': '/complaint/register',
@@ -228,8 +282,9 @@ def health():
     
     return jsonify({
         'status': 'healthy',
-        'model_loaded': model is not None,
-        'database': db_status
+        'classification': 'rule-based',
+        'database': db_status,
+        'total_complaints': Complaint.query.count()
     })
 
 
@@ -246,46 +301,19 @@ def classify():
         if not text:
             return jsonify({'error': 'Empty text'}), 400
         
-        # Try to load model
-        try:
-            import torch
-            current_model, current_tokenizer = get_model()
-        except Exception as e:
-            logger.error(f"Model load failed: {e}")
-            return jsonify({
-                'error': 'Model unavailable',
-                'message': 'Upgrade to paid tier for ML classification',
-                'fallback': True
-            }), 503
+        # Rule-based classification (fast, no memory issues)
+        category, category_id, confidence, department, top_predictions = classify_complaint_rule_based(text)
         
-        # Classify
-        inputs = current_tokenizer(text, padding=True, truncation=True, max_length=128, return_tensors="pt")
-        
-        with torch.no_grad():
-            outputs = current_model(**inputs)
-            predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
-            top3_values, top3_indices = torch.topk(predictions[0], 3)
-            predicted_class = top3_indices[0].item()
-            confidence = top3_values[0].item()
-        
-        category = COMPLAINT_CATEGORIES.get(predicted_class, "App failure")
-        department = CATEGORY_DEPARTMENTS.get(category, "Customer Service")
-        
-        top_predictions = [
-            {"category": COMPLAINT_CATEGORIES.get(top3_indices[i].item(), "Unknown"),
-             "confidence": round(float(top3_values[i].item()), 4)}
-            for i in range(3)
-        ]
-        
-        # Log
+        # Log to database
         log = ClassificationLog(
             session_id=session_id,
             input_text=text,
             predicted_category=category,
-            predicted_category_id=predicted_class,
+            predicted_category_id=category_id,
             confidence_score=confidence,
             department=department,
-            top_predictions=top_predictions
+            top_predictions=top_predictions,
+            model_version='rule-based-v1.0'
         )
         db.session.add(log)
         db.session.commit()
@@ -294,7 +322,7 @@ def classify():
         
         return jsonify({
             'category': category,
-            'category_id': predicted_class,
+            'category_id': category_id,
             'confidence': confidence,
             'department': department,
             'top_predictions': top_predictions
@@ -340,7 +368,7 @@ def register_complaint():
         return jsonify({
             'success': True,
             'complaint_id': complaint.complaint_id,
-            'message': 'Complaint registered'
+            'message': 'Complaint registered successfully'
         })
     
     except Exception as e:
@@ -354,8 +382,13 @@ def get_complaints():
     try:
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('per_page', 20, type=int)
+        status = request.args.get('status')
         
-        complaints = Complaint.query.order_by(Complaint.created_at.desc()).paginate(
+        query = Complaint.query
+        if status:
+            query = query.filter_by(status=status)
+        
+        complaints = query.order_by(Complaint.created_at.desc()).paginate(
             page=page, per_page=per_page, error_out=False
         )
         
@@ -370,6 +403,31 @@ def get_complaints():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/message/log', methods=['POST'])
+def log_message():
+    try:
+        data = request.get_json()
+        
+        message = ChatMessage(
+            session_id=data['session_id'],
+            role=data['role'],
+            message=data['message'],
+            was_classified=data.get('was_classified', False),
+            classified_category=data.get('classified_category'),
+            classification_confidence=data.get('classification_confidence')
+        )
+        
+        db.session.add(message)
+        db.session.commit()
+        
+        return jsonify({'success': True})
+    
+    except Exception as e:
+        logger.error(f"Message log error: {e}")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
 # Initialize DB
 with app.app_context():
     try:
@@ -381,8 +439,11 @@ with app.app_context():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
+    logger.info("=" * 60)
+    logger.info("🚂 IRCTC Complaint System - Rule-Based Classification")
+    logger.info("=" * 60)
+    logger.info("✅ Optimized for free tier (no ML model)")
     logger.info(f"🚀 Starting on port {port}")
-    logger.info("⚡ Model: Lazy loading")
+    logger.info("=" * 60)
     
-    # Use gunicorn in production
     app.run(host='0.0.0.0', port=port, debug=False)
