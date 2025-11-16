@@ -1,45 +1,86 @@
-# Python
+############################################################
+# PYTHON
+############################################################
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
 .Python
+
+# Virtual Environments
 env/
 venv/
 .venv/
 ENV/
-*.egg-info/
 
-# Database
+# Python package files
+*.egg-info/
+dist/
+build/
+
+############################################################
+# DATABASE
+############################################################
 *.db
 *.sqlite
 *.sqlite3
 backend/irctc_complaints.db
 
-# Model files - WE'LL DOWNLOAD FROM HUGGING FACE
+############################################################
+# MODEL FILES (IMPORTANT)
+# Models will be downloaded from Hugging Face → do not commit.
+############################################################
 backend/model/
 *.bin
 *.safetensors
+*.gguf
 *.pt
 *.pth
+*.ckpt
 
-# Environment variables
+############################################################
+# ENVIRONMENT VARIABLES
+############################################################
 .env
 .env.local
+.env.production
 frontend/.env
-frontend/config.js
 
-# Node.js
+############################################################
+# NODE.JS / REACT
+############################################################
 frontend/node_modules/
 frontend/dist/
 frontend/build/
+frontend/.vite/
 
-# IDE
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+############################################################
+# IDE / EDITOR
+############################################################
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
 
-# OS
+############################################################
+# OS FILES
+############################################################
 .DS_Store
 Thumbs.db
 
-# Logs
+############################################################
+# LOGS
+############################################################
 *.log
+logs/
+
+############################################################
+# TEMPORARY FILES
+############################################################
+*.tmp
+*.temp
